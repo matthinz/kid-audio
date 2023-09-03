@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-DEST="/Volumes/Kid Audio"
+DEST=".player"
 EXCLUDE_FILE=".sync_exclude.txt"
 
 RSYNC="rsync"
