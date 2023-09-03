@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+
+const { loadMetadataForDirectory } = require("../lib/metadata.js");
+const { ffmpeg } = require("../lib/ffmpeg.js");
+
+const TEMP_FILE = ".temp.mp3";
+
+run(process.argv.slice(2)).catch((err) => {
+  console.error(err);
+});
+
+async function run(args) {
+  const { dryRun } = parseArgs(args);
+
+  const metadata = await loadMetadataForDirectory(".");
+
+  const files = (await fs.readdir(".")).filter((f) => /\.mp3$/.test(f));
+
+  files.sort();
+
+  await files.reduce(
+    (promise, file, index) =>
+      promise.then(async () => {
+        console.error(`Processing ${file}`);
+
+        const fileMetadata = getFileMetadata(
+          file,
+          index,
+          files.length,
+          metadata
+        );
+
+        const args = buildFfmpegArgs(file, fileMetadata);
+
+
+        if (dryRun) {
+          console.log(`ffmpeg ${args.join(" ")}`);
+          return;
+        }
+
+        await ffmpeg(args);
+
+        await fs.rename(TEMP_FILE, file);
+      }),
+    Promise.resolve()
+  );
+}
+
+function getFileMetadata(file, index, count, metadata) {
+  return Object.assign(
+    {
+      disc: 1,
+    },
+    metadata,
+    {
+      title: path.basename(file, ".mp3"),
+      track: `${index + 1}/${count}`,
+    }
+  );
+}
+
+function buildFfmpegArgs(file, fileMetadata) {
+
+  const args = [
+    "-y", // overwrite output files
+    "-i",
+    file, // Input file
+  ];
+
+  Object.keys(fileMetadata).forEach((key) => {
+
+    args.push("-metadata", `${key}=${fileMetadata[key]}`);
+  });
+
+  args.push(
+    TEMP_FILE // Output file
+  );
+
+  return args;
+}
+
+function parseArgs(args) {
+  let dryRun = false;
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--dry-run":
+        dryRun = true;
+        break;
+      default:
+        throw new Error(`Invalid argument: ${args[i]}`);
+    }
+  }
+
+  return { dryRun };
+}

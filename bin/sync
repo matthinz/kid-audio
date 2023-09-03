@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEST="/Volumes/Kid Audio"
+EXCLUDE_FILE=".sync_exclude.txt"
+
+RSYNC="rsync"
+
+$RSYNC --exclude-from="${EXCLUDE_FILE}" --progress --recursive --delete Music/ "${DEST}/Music/"
+
+$RSYNC --exclude-from="${EXCLUDE_FILE}" --progress --recursive --delete Stories/ "${DEST}/Stories/"
