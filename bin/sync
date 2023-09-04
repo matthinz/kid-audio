@@ -7,6 +7,8 @@ EXCLUDE_FILE=".sync_exclude.txt"
 
 RSYNC="rsync"
 
+bin/prepare_file Music/*.mp3
+
 $RSYNC --exclude-from="${EXCLUDE_FILE}" --progress --recursive --delete Music/ "${DEST}/Music/"
 
 $RSYNC --exclude-from="${EXCLUDE_FILE}" --progress --recursive --delete Stories/ "${DEST}/Stories/"

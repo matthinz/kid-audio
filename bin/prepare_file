@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+
+const fs = require("node:fs/promises");
+const path = require("node:path");
+
+const { loadMetadataForFile } = require("../lib/metadata.js");
+const { ffmpeg } = require("../lib/ffmpeg.js");
+
+const WORKING_DIR = ".working";
+
+const METADATA_KEYS_THAT_ARE_NOT_ID3_TAGS = ["__mtime", "setTrack"];
+
+run(process.argv.slice(2)).catch((err) => {
+  console.error(err);
+});
+
+async function run(files) {
+  await files.reduce(
+    (promise, file) =>
+      promise.then(async () => {
+        await processFile(file);
+      }),
+    Promise.resolve()
+  );
+}
+
+async function processFile(file) {
+  file = path.resolve(file);
+
+  if (!/\.mp3$/.test(file)) {
+    throw new Error(`Not an MP3 file: ${file}`);
+  }
+
+  const normalizedFile = path.join(
+    path.dirname(file),
+    WORKING_DIR,
+    `${path.basename(file, ".mp3")}.normalized.mp3`
+  );
+
+  let needToReplaceFile = false;
+
+  if (await needsUpdate(normalizedFile, file)) {
+    // Using input file as a source, re-normalize.
+    // This updates the normalizedFile, but does not update the source file
+    await doNormalization(file, normalizedFile);
+    needToReplaceFile = true;
+  }
+
+  const { __mtime: mtime, ...metadata } = await loadMetadataForFile(file);
+
+  if (await needsUpdate(file, mtime)) {
+    // Metadata files are newer than the file, so update the normalized file
+    // with new metadata
+    const fileMetadata = await getFileMetadata(file, metadata);
+    await updateFileMetadata(normalizedFile, fileMetadata);
+    needToReplaceFile = true;
+  }
+
+  // Replace the file with the updated normalized file
+  if (needToReplaceFile) {
+    await fs.copyFile(normalizedFile, file);
+
+    // Mark the normalized file as at least as new as the source file
+    await fs.utimes(normalizedFile, Date.now(), Date.now());
+  }
+}
+
+async function doNormalization(file, destFile) {
+  await fs.mkdir(path.dirname(destFile), { recursive: true });
+  console.log(`Normalize ${file}`);
+  await fs.copyFile(file, destFile);
+}
+
+async function needsUpdate(file, destFileOrMTime) {
+  let mtime;
+
+  if (typeof destFileOrMTime === "string") {
+    let destStat;
+
+    try {
+      destStat = await fs.stat(destFileOrMTime);
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return true;
+      }
+      throw err;
+    }
+    mtime = destStat.mtime;
+  } else if (destFileOrMTime instanceof Date) {
+    mtime = destFileOrMTime;
+  } else {
+    throw new Error(`Invalid argument: ${destFileOrMTime}`);
+  }
+
+  const stat = await fs.stat(file);
+
+  return stat.mtime < mtime;
+}
+
+function buildFfmpegId3Args(inputFile, outputFile, metadata) {
+  const args = [
+    "-y", // overwrite output files
+    "-i",
+    inputFile,
+  ];
+
+  Object.keys(metadata).forEach((key) => {
+    if (METADATA_KEYS_THAT_ARE_NOT_ID3_TAGS.includes(key)) {
+      return;
+    }
+    args.push("-metadata", `${key}=${metadata[key]}`);
+  });
+
+  args.push(outputFile);
+
+  return args;
+}
+
+async function getFileMetadata(file, metadata) {
+  const title = path.basename(file, ".mp3");
+
+  const allFiles = (await fs.readdir(path.dirname(file)))
+    .filter((f) => /\.mp3$/.test(f))
+    .sort();
+
+  const result = Object.assign({}, metadata, {
+    title,
+  });
+
+  if (metadata.setTrack !== false) {
+    const track = allFiles.findIndex((f) => path.basename(file) === f) + 1;
+
+    if (track > 0) {
+      result.track = `${track}/${allFiles.length}`;
+    }
+
+    result.disc = result.disc ?? 1;
+  }
+
+  delete result.setTrack;
+
+  return result;
+}
+
+async function updateFileMetadata(file, metadata) {
+  console.log(`Update metadata for ${file}: ${JSON.stringify(metadata)}`);
+
+  const outputFile = path.join(path.dirname(file), ".temp.mp3");
+
+  const args = buildFfmpegId3Args(file, outputFile, metadata);
+
+  await ffmpeg(args);
+
+  await fs.rename(outputFile, file);
+}
