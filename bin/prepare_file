@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 
+// @ts-check
+
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const { loadMetadataForFile } = require("../lib/metadata.js");
-const { ffmpeg } = require("../lib/ffmpeg.js");
+const {
+  ffmpeg,
+  ffmpegNormalize,
+  ffmpegWavToMp3,
+  ffmpegExtractCoverArt,
+} = require("../lib/ffmpeg.js");
 
 const WORKING_DIR = ".working";
 
@@ -48,7 +55,7 @@ async function processFile(file) {
 
   const { __mtime: mtime, ...metadata } = await loadMetadataForFile(file);
 
-  if (await needsUpdate(file, mtime)) {
+  if (needToReplaceFile || (await needsUpdate(file, mtime))) {
     // Metadata files are newer than the file, so update the normalized file
     // with new metadata
     const fileMetadata = await getFileMetadata(file, metadata);
@@ -65,10 +72,123 @@ async function processFile(file) {
   }
 }
 
-async function doNormalization(file, destFile) {
-  await fs.mkdir(path.dirname(destFile), { recursive: true });
+/**
+ *
+ * @param file {string}
+ * @param normalizedFile {string}
+ * @returns
+ */
+async function doNormalization(file, normalizedFile) {
   console.log(`Normalize ${file}`);
-  await fs.copyFile(file, destFile);
+
+  // Ensure we have a backup of the original file
+  const [originalFile, coverArtFile] = await Promise.all([
+    createOriginalVersion(file),
+    extractCoverArt(file),
+  ]);
+
+  // Write a .wav file to do audio normalization on, but we don't
+  // *overwrite* it if it already exists.
+
+  const wavFile = await createWavVersion(file);
+
+  const normalizedWavFile = await normalizeWavFile(wavFile);
+
+  // Re-convert the wav file to MP3
+  const normalizedMp3File = normalizedWavFile.replace(/\.wav$/, ".mp3");
+
+  await ffmpegWavToMp3(normalizedWavFile, normalizedMp3File);
+
+  await Promise.all([fs.unlink(wavFile), fs.unlink(normalizedWavFile)]);
+
+  return normalizedMp3File;
+}
+
+/**
+ * @param file {string}
+ * @returns {Promise<string>}
+ */
+async function createOriginalVersion(file) {
+  const originalFile = path.join(
+    path.dirname(file),
+    WORKING_DIR,
+    path.basename(file).replace(/\.mp3$/, ".original.mp3")
+  );
+
+  await fs.mkdir(path.dirname(originalFile), { recursive: true });
+
+  try {
+    const stat = await fs.stat(originalFile);
+    if (stat.isFile()) {
+      return originalFile;
+    }
+  } catch {}
+
+  console.log("Backing up original file");
+
+  await fs.copyFile(file, originalFile);
+
+  return originalFile;
+}
+
+/**
+ * @param file {string}
+ * @returns {Promise<string>}
+ */
+async function createWavVersion(file) {
+  const wavFile = path.join(
+    path.dirname(file),
+    WORKING_DIR,
+    path.basename(file).replace(/\..*$/, ".wav")
+  );
+
+  if (await isFile(wavFile)) {
+    return wavFile;
+  }
+
+  await fs.mkdir(path.dirname(wavFile), { recursive: true });
+
+  await ffmpeg(["-i", file, "-n", wavFile]);
+
+  return wavFile;
+}
+
+/**
+ *
+ * @param file {string}
+ * @returns {Promise<string>}
+ */
+async function extractCoverArt(file) {
+  const coverArtFile = path.join(
+    path.dirname(file),
+    WORKING_DIR,
+    path.basename(file).replace(/\..*$/, ".cover.png")
+  );
+
+  await fs.mkdir(path.dirname(coverArtFile), { recursive: true });
+
+  await ffmpegExtractCoverArt(file, coverArtFile);
+
+  return coverArtFile;
+}
+
+/**
+ * Performs 2-pass audio normalization on the given WAV file.
+ * @param file {string}
+ * @returns {Promise<string>} The normalized file name
+ */
+async function normalizeWavFile(file) {
+  const normalizedFile = file.replace(/\.wav$/, ".normalized.wav");
+
+  if (await isFile(normalizedFile)) {
+    return normalizedFile;
+  }
+
+  console.log("Normalizing audio levels...");
+
+  await ffmpegNormalize(file, normalizedFile);
+
+  return normalizedFile;
 }
 
 async function needsUpdate(file, destFileOrMTime) {
@@ -92,9 +212,17 @@ async function needsUpdate(file, destFileOrMTime) {
     throw new Error(`Invalid argument: ${destFileOrMTime}`);
   }
 
-  const stat = await fs.stat(file);
+  let stat;
 
-  return stat.mtime < mtime;
+  try {
+    stat = await fs.stat(file);
+  } catch (err) {
+    if (err.code != "ENOENT") {
+      throw err;
+    }
+  }
+
+  return !stat || stat.mtime < mtime;
 }
 
 function buildFfmpegId3Args(inputFile, outputFile, metadata) {
@@ -152,4 +280,47 @@ async function updateFileMetadata(file, metadata) {
   await ffmpeg(args);
 
   await fs.rename(outputFile, file);
+
+  const coverArtFile = path.join(
+    path.dirname(file),
+    path.basename(file).replace(/\..+/, ".cover.png")
+  );
+
+  await ffmpeg([
+    "-i",
+    file,
+    "-i",
+    coverArtFile,
+    "-map",
+    "0:0",
+    "-map",
+    "1:0",
+    "-codec",
+    "copy",
+    "-id3v2_version",
+    "3",
+    "-metadata:s:v",
+    "title=Album cover",
+    "-metadata:s:v",
+    "comment=Cover (front)",
+    outputFile,
+  ]);
+
+  await fs.rename(outputFile, file);
+}
+
+/**
+ *
+ * @param file {string}
+ * @returns {Promise<boolean>}
+ */
+async function isFile(file) {
+  try {
+    return (await fs.stat(file)).isFile();
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      throw err;
+    }
+    return false;
+  }
 }

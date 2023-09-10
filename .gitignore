@@ -1,5 +1,8 @@
 .DS_Store
+*.flac
 *.mp3
 *.mp4
 *.webm
+*.wav
 .player
+.working
